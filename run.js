@@ -600,12 +600,24 @@
                 const text = chat.innerText.trim();
                 if (!text) return;
 
-                result.push({ role, text });
+                // DOM에 붙는 순서(삽입 순서)는 신뢰하지 않는다.
+                // 스크롤로 과거 메시지를 불러올 때 DOM 뒤쪽(배열 끝)에 끼워 넣는
+                // 구조라면, DOM 순서 = 시간순이 아니게 되어 "과거 메시지 로드"를
+                // "새 메시지 도착"으로 오인하는 문제가 생긴다.
+                // 그래서 실제 화면상 세로 위치를 기준으로 정렬해서, 스크롤/DOM
+                // 삽입 방식과 무관하게 항상 위(과거)->아래(최신) 순서를 보장한다.
+                const top = bubble.getBoundingClientRect().top;
+
+                result.push({ role, text, top });
             });
 
-        setCount(result.length);
+        result.sort((a, b) => a.top - b.top);
 
-        return result;
+        const messages = result.map(({ role, text }) => ({ role, text }));
+
+        setCount(messages.length);
+
+        return messages;
     }
 
     //------------------------------------------
