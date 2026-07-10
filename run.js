@@ -121,8 +121,28 @@
     //------------------------------------------
 
     function saveHistory() {
+       
+        const messages = getMessages();
 
-function getProfile() {
+        const data = {
+            roomId,
+            updatedAt: Date.now(),
+            messages
+        };
+
+        localStorage.setItem(
+            STORAGE_KEY,
+            JSON.stringify(data)
+        );
+
+        setSaved(messages.length);
+        setStatus("Saved");
+
+        console.log("✅ Saved", messages.length);
+
+    }   
+
+   function getProfile() {
 
     const raw = localStorage.getItem(PROFILE_KEY);
 
@@ -148,26 +168,9 @@ function saveProfile(profile) {
     );
 
 }
-       
-        const messages = getMessages();
-
-        const data = {
-            roomId,
-            updatedAt: Date.now(),
-            messages
-        };
-
-        localStorage.setItem(
-            STORAGE_KEY,
-            JSON.stringify(data)
-        );
-
-        setSaved(messages.length);
-        setStatus("Saved");
-
-        console.log("✅ Saved", messages.length);
-
-    }    //------------------------------------------
+   
+   
+   //------------------------------------------
     // Auto Save
     //------------------------------------------
 
