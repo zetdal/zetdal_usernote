@@ -168,7 +168,40 @@ function saveProfile(profile) {
     );
 
 }
-   
+
+   async function callOpenAI(prompt) {
+
+    const profile = getProfile();
+
+    if (!profile) {
+        alert("프로필이 없습니다.");
+        return;
+    }
+
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${profile.apiKey}`
+        },
+        body: JSON.stringify({
+            model: profile.model,
+            messages: [
+                {
+                    role: "user",
+                    content: prompt
+                }
+            ]
+        })
+    });
+
+    const data = await res.json();
+
+    console.log(data);
+
+    return data;
+
+}
    
    //------------------------------------------
     // Auto Save
@@ -275,6 +308,8 @@ function setupProfile() {
         saveHistory,
 
         autoSave,
+
+       callOpenAI,
 
         observer
 
