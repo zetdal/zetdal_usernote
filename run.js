@@ -17,6 +17,8 @@
    const PROFILE_KEY = "zeta-memory-profile";
     const roomId = location.pathname.split("/").pop();
     const STORAGE_KEY = `zeta-memory-${roomId}`;
+   const MEMORY_LENGTH_KEY =
+    `${STORAGE_KEY}-memory-length`;
 
    let updatingMemory = false;
 
@@ -247,6 +249,11 @@ ${conversation}
 
 const memory = await callOpenAI(prompt);
 
+      localStorage.setItem(
+    MEMORY_LENGTH_KEY,
+    conversation.length
+);
+
 localStorage.setItem(
     `${STORAGE_KEY}-memory`,
     memory
@@ -283,7 +290,11 @@ const length = history
     .join("")
     .length;
 
-if (length >= 5000) {
+const lastLength = Number(
+    localStorage.getItem(MEMORY_LENGTH_KEY) || 0
+);
+
+if (length - lastLength >= 5000) {
 
     updateMemory();
 
