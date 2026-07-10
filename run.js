@@ -3,7 +3,7 @@
     "use strict";
 
     // ==========================
-    // Zeta User Note v2.0.0
+    // Zeta User Note v2.1.0
     //
     // 원리:
     // - 유저가 직접 쓴 노트를 저장해둔다 (AI 요약 없음, API 호출도 없음).
@@ -19,8 +19,15 @@
     }
     window.__ZETA_USERNOTE_RUNNING__ = true;
 
-    const VERSION = "2.0.0";
+    const VERSION = "2.1.0";
     const NOTE_TAG = "[유저 노트]";
+    // 노트 앞에 붙는 안내문. 이 노트는 "기억"용일 뿐, 모델이 매번 대놓고
+    // 인용하거나 반복해서 되짚는(=뇌절) 걸 막기 위한 지시를 함께 넣는다.
+    const NOTE_INSTRUCTION =
+        "(이건 사용자가 남겨둔 배경 기억 메모입니다. " +
+        "이 메모의 존재나 내용을 답장에서 직접 언급하거나, 그대로 인용하거나, " +
+        "굳이 여러 번 다시 꺼내 반복하지 마세요. " +
+        "그냥 원래 알고 있던 것처럼 자연스럽게 대화에 녹여서 필요할 때만 조용히 참고하세요.)";
     const STREAM_URL_RE = /\/v1\/rooms\/[^/]+\/messages\/stream(?:\?|$)/;
 
     const SETTINGS_KEY = "zeta-usernote-settings"; // 전역: { deltaChars, enabled }
@@ -192,16 +199,27 @@
 
   #btn {
     position: fixed;
-    width: 42px; height: 42px; border-radius: 50%;
+    width: 32px; height: 32px; border-radius: 50%;
     background: #ff5d8f; color: #fff;
     display: flex; align-items: center; justify-content: center;
-    font-size: 19px; cursor: pointer;
-    box-shadow: 0 4px 16px rgba(0,0,0,.5);
+    cursor: pointer;
+    box-shadow: 0 3px 12px rgba(0,0,0,.5);
     border: 2px solid #fff;
     touch-action: none;
     user-select: none;
+    -webkit-user-select: none;
+    -webkit-touch-callout: none;
   }
+  #btn svg { width: 15px; height: 15px; pointer-events: none; }
   #btn.dragging { opacity: 0.7; }
+  #btn.ready { box-shadow: 0 0 0 3px rgba(124,252,156,.6), 0 3px 12px rgba(0,0,0,.5); }
+  #btn .dot {
+    position: absolute; top: -2px; right: -2px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #7CFC9C; border: 1.5px solid #17171c;
+    display: none;
+  }
+  #btn.ready .dot { display: block; }
 
   #panel {
     position: fixed;
@@ -240,17 +258,17 @@
   hr { border: none; border-top: 1px solid #333; margin: 10px 0; }
 </style>
 
-<div id="btn">📝</div>
+<div id="btn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg><span class="dot"></span></div>
 <div id="panel">
   <div class="title">
-    <span>📝 User Note</span>
+    <span>User Note</span>
     <span style="font-weight:normal;font-size:10px;color:#999;">v${VERSION}</span>
   </div>
   <div class="room" id="room"></div>
 
   <textarea id="note" placeholder="예)
-현재상황요약: 남과 여가 아침에 OO 때문에 다투고 각자 출근함
-중요설정: ..."></textarea>
+지난상황요약: ...
+고정설정: ..."></textarea>
   <div class="count" id="count">0자</div>
 
   <div class="progress-label">
@@ -284,6 +302,12 @@
     <button id="import">⬆ 불러오기</button>
   </div>
   <div class="count" id="export-hint">짧게 탭: 이 방만 / 길게 누르기: 전체 백업</div>
+
+  <hr>
+
+  <div class="row">
+    <button id="reset-pos">버튼 위치 초기화</button>
+  </div>
 </div>
 `;
 
@@ -300,11 +324,14 @@
     const progressTextEl = el("progress-text");
     const progressFillEl = el("progress-fill");
 
+    const BTN_SIZE = 32;
+    const BTN_MARGIN = 4;
+
     function applyPos(pos) {
         btnEl.style.left = pos.left + "px";
         btnEl.style.bottom = pos.bottom + "px";
         panelEl.style.left = pos.left + "px";
-        panelEl.style.bottom = (pos.bottom + 50) + "px";
+        panelEl.style.bottom = (pos.bottom + BTN_SIZE + 10) + "px";
     }
 
     applyPos(getPos());
@@ -325,6 +352,12 @@
         progressTextEl.textContent = `${Math.min(delta, threshold).toLocaleString()} / ${threshold.toLocaleString()}자`;
         const pct = threshold > 0 ? Math.min(100, (delta / threshold) * 100) : 0;
         progressFillEl.style.width = pct + "%";
+
+        // 편의 기능: 곧 자동 삽입될 만큼 진행됐고, 노트가 비어있지 않으면
+        // 버튼 오른쪽 위에 작은 점(dot)을 띄워 알려준다.
+        const settings = getSettings();
+        const ready = settings.enabled && getNote().trim() && delta >= threshold;
+        btnEl.classList.toggle("ready", !!ready);
     }
 
     function refreshRoomUI() {
@@ -377,16 +410,18 @@
         if (Math.abs(dx) > 6 || Math.abs(dy) > 6) moved = true;
         if (!moved) return;
 
-        const newLeft = Math.min(Math.max(startPos.left + dx, 4), window.innerWidth - 46);
-        const newBottom = Math.min(Math.max(startPos.bottom - dy, 4), window.innerHeight - 46);
+        const newLeft = Math.min(Math.max(startPos.left + dx, 4), window.innerWidth - (BTN_SIZE + BTN_MARGIN));
+        const newBottom = Math.min(Math.max(startPos.bottom - dy, 4), window.innerHeight - (BTN_SIZE + BTN_MARGIN));
 
         applyPos({ left: newLeft, bottom: newBottom });
     }
 
-    function onDragEnd() {
+    function onDragEnd(e) {
         if (!dragging) return;
         dragging = false;
         btnEl.classList.remove("dragging");
+
+        if (e && e.type === "touchend") e.preventDefault();
 
         if (moved) {
             savePos({
@@ -398,18 +433,39 @@
         }
     }
 
-    btnEl.addEventListener("mousedown", onDragStart);
-    window.addEventListener("mousemove", onDragMove);
-    window.addEventListener("mouseup", onDragEnd);
+    // 모바일(터치 지원 기기)과 데스크톱(마우스)에서 이벤트 리스너를 분리해서 등록한다.
+    // 예전 버전은 touch + mouse 리스너를 동시에 등록해서, 모바일 탭 한 번에
+    // touchend(패널 열기) → 뒤이어 브라우저가 만들어내는 합성 mouseup(패널 닫기)이
+    // 연달아 발생 -> "열렸다가 바로 닫히는" 버그가 있었다.
+    // 꾹 누르면(길게 누르기) 두 이벤트 발생 시점이 벌어져서 우연히 열린 채로 보였던 것.
+    const supportsTouch = ("ontouchstart" in window) || navigator.maxTouchPoints > 0;
 
-    btnEl.addEventListener("touchstart", onDragStart, { passive: true });
-    window.addEventListener("touchmove", onDragMove, { passive: true });
-    window.addEventListener("touchend", onDragEnd);
+    if (supportsTouch) {
+        btnEl.addEventListener("touchstart", onDragStart, { passive: true });
+        window.addEventListener("touchmove", onDragMove, { passive: true });
+        window.addEventListener("touchend", onDragEnd, { passive: false });
+        window.addEventListener("touchcancel", () => { dragging = false; btnEl.classList.remove("dragging"); });
+    } else {
+        btnEl.addEventListener("mousedown", onDragStart);
+        window.addEventListener("mousemove", onDragMove);
+        window.addEventListener("mouseup", onDragEnd);
+    }
 
     function setPanelOpen(open) {
         panelEl.classList.toggle("open", open);
         if (open) refreshRoomUI();
     }
+
+    // 편의 기능: 패널 바깥을 클릭하거나 ESC를 누르면 패널을 닫는다.
+    document.addEventListener("click", (e) => {
+        if (!panelEl.classList.contains("open")) return;
+        if (host.contains(e.target) || (e.composedPath && e.composedPath().includes(host))) return;
+        setPanelOpen(false);
+    }, true);
+
+    document.addEventListener("keydown", (e) => {
+        if (e.key === "Escape" && panelEl.classList.contains("open")) setPanelOpen(false);
+    });
 
     //------------------------------------------
     // 노트 저장 / 비우기 / 강제 삽입
@@ -441,6 +497,14 @@
         saveNote("");
         updateCount();
         flashSaved("비움");
+    });
+
+    // 편의 기능: 버튼이 화면 밖으로 나가거나 찾기 힘든 위치로 갔을 때 기본 위치로 복구
+    el("reset-pos").addEventListener("click", () => {
+        const defaultPos = { left: 16, bottom: 80 };
+        savePos(defaultPos);
+        applyPos(defaultPos);
+        flashSaved("위치 초기화됨");
     });
 
     // "지금 바로 삽입": 다음 메시지 전송 시 강제로 노트를 끼워 넣는다.
@@ -483,7 +547,8 @@
     const progressObserver = new MutationObserver(() => {
         clearTimeout(window.__zetaUserNoteTimer__);
         window.__zetaUserNoteTimer__ = setTimeout(() => {
-            if (panelEl.classList.contains("open")) refreshProgress();
+            // 패널이 닫혀있어도 버튼의 "삽입 임박" 점 표시는 갱신한다.
+            refreshProgress();
         }, 500);
     });
     progressObserver.observe(document.body, { childList: true, subtree: true, characterData: true });
@@ -518,7 +583,7 @@
                     const shouldInject = note && !alreadyTagged && (forceNext || (settings.enabled && delta >= threshold));
 
                     if (shouldInject) {
-                        bodyObj.text = `${NOTE_TAG}\n${note}\n\n[사용자 입력]\n${bodyObj.text}`;
+                        bodyObj.text = `${NOTE_TAG} ${NOTE_INSTRUCTION}\n${note}\n\n[사용자 입력]\n${bodyObj.text}`;
                         init = Object.assign({}, init, { body: JSON.stringify(bodyObj) });
 
                         // 삽입한 시점을 새 기준점으로 다시 잡는다 (진행도 리셋)
@@ -656,12 +721,15 @@
         };
         const cancelPress = () => clearTimeout(pressTimer);
 
-        btn.addEventListener("touchstart", startPress, { passive: true });
-        btn.addEventListener("touchend", cancelPress);
-        btn.addEventListener("touchmove", cancelPress);
-        btn.addEventListener("mousedown", startPress);
-        btn.addEventListener("mouseup", cancelPress);
-        btn.addEventListener("mouseleave", cancelPress);
+        if (supportsTouch) {
+            btn.addEventListener("touchstart", startPress, { passive: true });
+            btn.addEventListener("touchend", cancelPress);
+            btn.addEventListener("touchmove", cancelPress);
+        } else {
+            btn.addEventListener("mousedown", startPress);
+            btn.addEventListener("mouseup", cancelPress);
+            btn.addEventListener("mouseleave", cancelPress);
+        }
         btn.addEventListener("contextmenu", (e) => e.preventDefault());
 
         btn.addEventListener("click", () => {
