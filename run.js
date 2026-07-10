@@ -1,8 +1,5 @@
 (() => {
-   const memoryScript = document.createElement("script");
-memoryScript.src = "https://zeta-memory.github.io/zeta_memory/memory.js?t=" + Date.now();
-document.head.appendChild(memoryScript);
-    
+   
     "use strict";
 
     // ==========================
