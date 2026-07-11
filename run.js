@@ -19,7 +19,7 @@
     }
     window.__ZETA_USERNOTE_RUNNING__ = true;
 
-    const VERSION = "2.1.0";
+    const VERSION = "2.1.1-debug";
     const NOTE_TAG = "[유저 노트]";
     // 노트 앞에 붙는 안내문. 이 노트는 "기억"용일 뿐, 모델이 매번 대놓고
     // 인용하거나 반복해서 되짚는(=뇌절) 걸 막기 위한 지시를 함께 넣는다.
