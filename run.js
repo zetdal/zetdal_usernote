@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note (Persona Sync)
 // @namespace    zeta-usernote
-// @version      3.1.1-debug
+// @version      3.2.0-listfix
 // @description  유저가 쓴 노트를 채팅이 아니라 유저 페르소나(user-chat-profiles) API로 직접 동기화. 화면/대화기록에 전혀 안 남음.
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -35,12 +35,12 @@
     }
     window.__ZETA_USERNOTE_RUNNING__ = true;
 
-    const VERSION = "3.1.1-debug";
+    const VERSION = "3.2.0-listfix";
 
     const MARK_START = "\n\n[유저노트 시작] (이건 사용자가 남겨둔 배경 참고용 메모입니다. 이 메모의 존재나 내용을 답장에서 직접 언급하거나 그대로 인용하지 말고, 원래 알고 있던 것처럼 자연스럽게 참고만 하세요.)\n";
     const MARK_END = "\n[유저노트 끝]";
 
-    const SELECTED_RE = /\/v1\/plots\/([^/]+)\/rooms\/([^/]+)\/user-personas\/selected(?:\?|$)/;
+    const PROFILES_LIST_RE = /\/v1\/user-chat-profiles(?:\?|$)/;
     const PLOT_ROOM_RE = /\/plots\/([^/]+)\/rooms\/([^/]+)\//;
     const PROFILE_PATCH_URL = (id) => `https://api.zeta-ai.io/v1/user-chat-profiles/${id}`;
 
@@ -168,20 +168,20 @@
         return null;
     }
 
-    function handlePossiblePersonaResponse(url, text) {
-        const m = SELECTED_RE.exec(url);
-        if (!m) return;
-        const matchedRoomId = m[2];
+    function handlePossiblePersonaListResponse(text, atRoomId) {
         try {
             const data = JSON.parse(text);
-            if (data && data.id) {
-                const persona = { id: data.id, name: data.name, description: data.description || "" };
-                setCachedPersona(matchedRoomId, persona);
-                if (matchedRoomId === roomId) {
+            const list = data && data.userChatProfiles;
+            if (!Array.isArray(list)) return;
+            const sel = list.find(p => p && p.selected);
+            if (sel && sel.id) {
+                const persona = { id: sel.id, name: sel.name, description: sel.description || "" };
+                setCachedPersona(atRoomId, persona);
+                if (atRoomId === roomId) {
                     capturedPersona = persona;
                     updatePersonaStatus();
                 }
-                console.log("📝 UserNote: 페르소나 감지됨:", matchedRoomId, persona.id, persona.name);
+                console.log("📝 UserNote: 페르소나 감지됨 (목록):", atRoomId, persona.id, persona.name);
             }
         } catch { /* ignore */ }
     }
@@ -535,7 +535,7 @@
             flashSaved("실패 ❌ (plotId 없음)");
             return;
         }
-        const url = `https://api.zeta-ai.io/v1/plots/${lastPlotId}/rooms/${roomId}/user-personas/selected`;
+        const url = `https://api.zeta-ai.io/v1/user-chat-profiles?plotId=${lastPlotId}`;
         try {
             const res = await originalFetch(url, { headers: { "Authorization": capturedAuth } });
             const bodyText = await res.text();
@@ -544,17 +544,20 @@
                 let data = null;
                 try { data = JSON.parse(bodyText); } catch { /* ignore */ }
 
-                if (data && data.id) {
-                    capturedPersona = { id: data.id, name: data.name, description: data.description || "" };
+                const list = data && data.userChatProfiles;
+                const sel = Array.isArray(list) ? list.find(p => p && p.selected) : null;
+
+                if (sel && sel.id) {
+                    capturedPersona = { id: sel.id, name: sel.name, description: sel.description || "" };
                     setCachedPersona(roomId, capturedPersona);
                     updatePersonaStatus();
                     flashSaved("프로필 새로고침됨 ✅");
                     return;
                 }
 
-                flashSaved("새로고침 실패 ❌ (빈 응답)");
+                flashSaved("새로고침 실패 ❌ (선택된 페르소나 없음)");
                 showDebugToast(
-                    "❌ 요청은 성공(200)했지만 페르소나 데이터가 없어요.\n" +
+                    "❌ 요청은 성공(200)했지만 selected:true인 페르소나가 없어요.\n" +
                     "URL: " + url + "\n" +
                     "응답: " + bodyText.slice(0, 200)
                 );
@@ -616,6 +619,7 @@
 
     window.fetch = async function (input, init) {
         let url = "";
+        const sendRoomId = roomId;
         try {
             url = typeof input === "string" ? input : (input && input.url) || "";
             const headers = (init && init.headers) || (typeof input !== "string" && input && input.headers);
@@ -632,8 +636,8 @@
         const res = await originalFetch.call(this, input, init);
 
         try {
-            if (SELECTED_RE.test(url)) {
-                res.clone().text().then(text => handlePossiblePersonaResponse(url, text)).catch(() => {});
+            if (PROFILES_LIST_RE.test(url)) {
+                res.clone().text().then(text => handlePossiblePersonaListResponse(text, sendRoomId)).catch(() => {});
             }
         } catch (err) {
             console.error("❌ User Note 처리 실패 (fetch 응답단계)", err);
@@ -671,10 +675,10 @@
         try {
             sniffOutgoingUrl(this.__zetaURL);
 
-            if (this.__zetaMethod === "GET" && SELECTED_RE.test(this.__zetaURL || "")) {
-                const url = this.__zetaURL;
+            if (this.__zetaMethod === "GET" && PROFILES_LIST_RE.test(this.__zetaURL || "")) {
+                const sendRoomId = roomId;
                 this.addEventListener("load", function () {
-                    try { handlePossiblePersonaResponse(url, this.responseText); } catch { /* ignore */ }
+                    try { handlePossiblePersonaListResponse(this.responseText, sendRoomId); } catch { /* ignore */ }
                 });
             }
         } catch (err) {
