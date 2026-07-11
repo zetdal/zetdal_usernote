@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note
 // @namespace    zeta-usernote
-// @version      2.2.0-xhr
+// @version      2.3.0-mask
 // @description  대화에 유저 노트를 몰래 끼워 넣는 스크립트
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -30,7 +30,7 @@
     }
     window.__ZETA_USERNOTE_RUNNING__ = true;
 
-    const VERSION = "2.2.0-xhr";
+    const VERSION = "2.3.0-mask";
     const NOTE_TAG = "[유저 노트]";
     // 노트 앞에 붙는 안내문. 이 노트는 "기억"용일 뿐, 모델이 매번 대놓고
     // 인용하거나 반복해서 되짚는(=뇌절) 걸 막기 위한 지시를 함께 넣는다.
@@ -587,7 +587,11 @@
     }, 1000);
 
     // 대화가 진행되는 동안 진행률 바를 갱신 (패널이 열려있을 때만, 가볍게)
+    // + 노트가 삽입된 내 말풍선이 화면에 그려지면, 화면에 보이는 텍스트만
+    //   원래 내가 쓴 문장으로 바꿔치기한다 (서버로 전송된 실제 내용은 그대로 유지).
     const progressObserver = new MutationObserver(() => {
+        maskInjectedBubbles();
+
         clearTimeout(window.__zetaUserNoteTimer__);
         window.__zetaUserNoteTimer__ = setTimeout(() => {
             // 패널이 닫혀있어도 버튼의 "삽입 임박" 점 표시는 갱신한다.
@@ -599,6 +603,22 @@
     //------------------------------------------
     // 삽입 판단 공통 로직 (fetch/XHR 둘 다에서 재사용)
     //------------------------------------------
+
+    // 노트가 삽입된 직후, 화면에 그 말풍선이 나타나면 이 텍스트로 덮어쓴다.
+    let pendingMaskText = null;
+
+    function maskInjectedBubbles() {
+        if (!pendingMaskText) return;
+        const bubbles = document.querySelectorAll(".bg-bubble-user");
+        for (let i = bubbles.length - 1; i >= 0; i--) {
+            const chat = bubbles[i].querySelector(".chat");
+            if (chat && chat.innerText.trim().startsWith(NOTE_TAG)) {
+                chat.innerText = pendingMaskText;
+                pendingMaskText = null;
+                break;
+            }
+        }
+    }
 
     function decideAndBuildInjectedText(originalText) {
         const settings = getSettings();
@@ -614,6 +634,12 @@
             // 삽입한 시점을 새 기준점으로 다시 잡는다 (진행도 리셋)
             setCheckpoint(messages);
             forceNext = false;
+
+            // 화면에 이 말풍선이 나타나면 원래 문장으로 가려준다.
+            pendingMaskText = originalText;
+            setTimeout(maskInjectedBubbles, 0);
+            setTimeout(maskInjectedBubbles, 300);
+            setTimeout(maskInjectedBubbles, 1000);
 
             console.log("📝 User Note 삽입됨 (진행도 리셋):", newText.slice(0, 80) + "...");
             showDebugToast("✅ 삽입됨\n실제 전송된 첫 90자:\n" + newText.slice(0, 90));
