@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note Corrector
 // @namespace    zeta-usernote-corrector
-// @version      1.6.0
+// @version      1.6.1
 // @description  유저노트(글자수 제한 없음)를 별도 저장해두고, 제타가 노트 내용과 명백히 모순되는 답변을 낼 때만 그 부분만 find/replace로 고친다. 로어북/장기기억/페르소나는 건드리지 않고, 원본 문체·나머지 내용은 그대로 유지한다.
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -18,7 +18,7 @@
   }
   window.__ZETA_USERNOTE_CORRECTOR_RUNNING__ = true;
 
-  const VERSION = "1.6.0";
+  const VERSION = "1.6.1";
 
   // ==========================================================
   // 0. 아주 작은 유틸
@@ -813,7 +813,10 @@
 
   function getDebug(roomId) {
     const v = localStorage.getItem("zeta-unc-debug-" + roomId);
-    return v === null ? true : v === "1"; // 기본 ON: 처음엔 진단이 우선
+    return v === null ? false : v === "1"; // 기본 OFF: 평소엔 조용히, 테스트할 때만 켜서 확인
+  }
+  function setDebug(roomId, on) {
+    localStorage.setItem("zeta-unc-debug-" + roomId, on ? "1" : "0");
   }
 
   async function computeCorrection(roomId, userText, envelopeText) {
@@ -1289,6 +1292,10 @@
       <input type="checkbox" id="enabled" style="width:auto;margin:0;">
       <label style="margin:0;">이 방에서 노트 반영 사용</label>
     </div>
+    <div class="row check">
+      <input type="checkbox" id="debugMode" style="width:auto;margin:0;">
+      <label style="margin:0;">디버그 로그 보기 (평소엔 꺼두세요)</label>
+    </div>
     <textarea id="note" placeholder="유저노트 글자수가 늘어나면 API 설정란의 토큰 사용량도 같이 늘어납니다.&#10;글자수/비용은 API 설정 탭에서 확인하며 조절하세요.&#10;&#10;출력 방식/규칙(예: 짧게 출력, 내레이션 금지 등)은 이 기능으로는 반영되지 않습니다."></textarea>
     <div class="count" id="count">0자</div>
     <div class="row">
@@ -1346,6 +1353,7 @@
   const countEl = el("count");
   const savedEl = el("saved");
   const enabledEl = el("enabled");
+  const debugModeEl = el("debugMode");
   const presetSelectEl = el("presetSelect");
   const presetNameEl = el("presetName");
   const providerEl = el("provider");
@@ -1414,6 +1422,7 @@
     roomEl.textContent = "Room: " + (roomId ? roomId.slice(0, 24) : "(감지 안 됨)");
     noteEl.value = getNote(roomId);
     enabledEl.checked = getEnabled(roomId);
+    debugModeEl.checked = getDebug(roomId);
     updateCount();
     refreshPresetUI();
     refreshTokenUI();
@@ -1432,6 +1441,7 @@
     flashSaved("저장됨");
   });
   enabledEl.addEventListener("change", () => setEnabled(roomId, enabledEl.checked));
+  debugModeEl.addEventListener("change", () => setDebug(roomId, debugModeEl.checked));
 
   // ---- API 탭 ----
   function refreshPresetUI() {
