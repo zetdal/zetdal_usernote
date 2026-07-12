@@ -454,16 +454,22 @@
     showToast(message, isError);
   }
 
+  function getDebug(roomId) {
+    const v = localStorage.getItem("zeta-unc-debug-" + roomId);
+    return v === null ? true : v === "1"; // 기본 ON: 처음엔 진단이 우선
+  }
+
   async function handleCompletedReply(url, userText, responseText) {
     const roomId = roomIdFromUrl(url);
     if (!roomId) return;
-    if (!getEnabled(roomId)) return;
+    const debug = getDebug(roomId);
+    if (!getEnabled(roomId)) { if (debug) toast("🔕 이 방은 노트 반영이 꺼져있음", false); return; }
 
     const envelope = extractReplyEnvelope(responseText);
-    if (!envelope.text) return;
+    if (!envelope.text) { if (debug) toast("⚠ 스트림 응답에서 답변 텍스트를 못 뽑음 (파싱 실패 가능성)", true); return; }
 
     const key = [roomId, envelope.messageId, envelope.candidateId, envelope.text.slice(0, 60)].join("|");
-    if (processedKeys.has(key)) return;
+    if (processedKeys.has(key)) { if (debug) toast("↩ 이미 처리한 답변이라 건너뜀", false); return; }
     processedKeys.add(key);
     if (processedKeys.size > 300) {
       const it = processedKeys.values();
@@ -471,10 +477,12 @@
     }
 
     const note = normalizeSpace(getNote(roomId));
-    if (!note) return; // 노트가 비어 있으면 손댈 이유가 없다.
+    if (!note) { if (debug) toast("📝 유저노트가 비어있어 건너뜀", false); return; }
 
     const preset = getActivePreset(roomId);
-    if (!preset) { toast("유저노트 교정: 사용할 API 프리셋이 없습니다.", true); return; }
+    if (!preset) { toast("❌ 사용할 API 프리셋이 없습니다.", true); return; }
+
+    if (debug) toast("⏳ 답변 캡처됨 (" + envelope.text.length + "자) → AI에 대조 요청 중...", false);
 
     // React 등의 렌더링이 안정될 시간을 살짝 준다.
     await new Promise((r) => setTimeout(r, 250));
@@ -483,21 +491,26 @@
       const { system, user } = buildCorrectionPrompt(note, userText, envelope.text);
       const raw = await callAI(preset, system, user);
       const parsed = parseModelJson(raw);
-      if (!parsed || !Array.isArray(parsed.conflicts) || !parsed.conflicts.length) return; // 모순 없음 → 아무것도 안 함
+      if (!parsed || !Array.isArray(parsed.conflicts)) {
+        if (debug) toast("⚠ AI 응답을 JSON으로 못 읽음. 원문 앞부분: " + String(raw || "").slice(0, 150), true);
+        return;
+      }
+      if (!parsed.conflicts.length) { if (debug) toast("✅ 대조 완료 — 노트와 모순되는 부분 없음", false); return; }
 
       const { result, applied, skipped } = applyConflicts(envelope.text, parsed.conflicts);
       if (!applied.length) {
-        if (skipped.length) console.log("📝 UserNote Corrector: 제안된 수정 전부 안전상 폐기됨", skipped);
+        const reasons = skipped.map((s) => (s.find || "").slice(0, 20) + "→" + s.why).join(" / ");
+        if (debug) toast("⚠ AI가 " + skipped.length + "건 제안했지만 전부 안전상 폐기됨: " + reasons, true);
         return;
       }
       const patched = patchVisibleReply(envelope.text, result, envelope.messageId, envelope.candidateId);
       if (patched) {
-        toast("유저노트 기준으로 " + applied.length + "곳 수정함", false);
-      } else {
-        console.log("📝 UserNote Corrector: 화면에서 원본 답변 요소를 찾지 못해 교정을 적용하지 못함.");
+        toast("✅ 유저노트 기준으로 " + applied.length + "곳 수정함", false);
+      } else if (debug) {
+        toast("⚠ 수정은 계산됐지만 화면에서 해당 답변 요소를 못 찾아 표시 못 함", true);
       }
     } catch (err) {
-      toast("유저노트 교정 실패: " + (err && err.message || err), true);
+      toast("❌ 유저노트 교정 실패: " + (err && err.message || err), true);
     }
   }
 
