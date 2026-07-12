@@ -417,8 +417,17 @@
     }
 
     function pickTightestMatch(pool) {
-      const matches = pool.filter((el) => normalizeSpace(el.textContent || "") === targetNorm);
-      if (!matches.length) return null;
+      // 1순위: textContent가 답변 원문과 "정확히" 같은 요소 (가장 안전, 오탐 위험 없음)
+      let matches = pool.filter((el) => normalizeSpace(el.textContent || "") === targetNorm);
+      if (!matches.length) {
+        // 2순위: 정확히 같은 요소가 없다면, 라벨("zeta" 표시, 타임스탬프 등)이 같은
+        // 컨테이너 안에 섞여 들어가 있는 경우가 있다. 이때는 "답변 원문 전체를
+        // 포함하고 있는" 요소들 중 가장 짧은(=가장 좁게 감싸는) 요소를 고른다.
+        matches = pool.filter((el) => normalizeSpace(el.textContent || "").includes(targetNorm));
+        if (!matches.length) return null;
+        matches.sort((a, b) => normalizeSpace(a.textContent || "").length - normalizeSpace(b.textContent || "").length);
+        return matches[0];
+      }
       // 자손 엘리먼트 수가 가장 적은(=텍스트를 가장 좁게 감싸는) 요소를 고른다.
       // 여러 메시지를 통째로 감싼 큰 컨테이너가 잘못 선택되는 것을 막는다.
       matches.sort((a, b) => a.querySelectorAll("*").length - b.querySelectorAll("*").length);
@@ -447,13 +456,39 @@
       return pickTightestMatch(broad);
     }
 
+    // 찾은 요소의 실제(raw) 텍스트 안에서 가능한 한 "원본 문자열 부분만" 바꾸고
+    // 나머지(라벨, 타임스탬프 등)는 그대로 남긴다. 라벨이 섞여 있지 않고 요소
+    // 전체가 답변 텍스트뿐이라면 결과적으로 전체 치환과 동일하다.
+    function applyToElement(elm) {
+      const full = elm.textContent || "";
+      if (full.includes(original)) {
+        elm.textContent = full.replace(original, revised);
+        return true;
+      }
+      // 공백/줄바꿈 방식이 미묘하게 달라 원본 그대로는 못 찾을 때를 위한
+      // 공백-무시 정규식 폴백. 그래도 못 찾으면 안전하게 전체를 덮어쓴다.
+      const escaped = original.replace(/[.*+?^${}()|[\]\\]/g, "\\$&").replace(/\s+/g, "\\s+");
+      let re = null;
+      try { re = new RegExp(escaped); } catch { re = null; }
+      if (re && re.test(full)) {
+        elm.textContent = full.replace(re, revised);
+        return true;
+      }
+      if (normalizeSpace(full) === targetNorm) {
+        elm.textContent = revised;
+        return true;
+      }
+      return false;
+    }
+
     const el = findTarget();
     if (!el) return false;
-    el.textContent = revised;
+    const ok = applyToElement(el);
+    if (!ok) return false;
     // 일부 프레임워크(React 등)가 다음 렌더에서 원문으로 되돌리는 경우가 있어 한 번 더 확인.
     setTimeout(() => {
       const again = findTarget();
-      if (again && normalizeSpace(again.textContent || "") === targetNorm) again.textContent = revised;
+      if (again && (again.textContent || "").includes(original)) applyToElement(again);
     }, 240);
     return true;
   }
