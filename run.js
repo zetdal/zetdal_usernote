@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note Corrector
 // @namespace    zeta-usernote-corrector
-// @version      1.7.2
+// @version      1.8.0
 // @description  유저노트(글자수 제한 없음)를 별도 저장해두고, 제타가 노트 내용과 명백히 모순되는 답변을 낼 때만 그 부분만 find/replace로 고친다. 로어북/장기기억/페르소나는 건드리지 않고, 원본 문체·나머지 내용은 그대로 유지한다.
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -18,7 +18,7 @@
   }
   window.__ZETA_USERNOTE_CORRECTOR_RUNNING__ = true;
 
-  const VERSION = "1.7.2";
+  const VERSION = "1.8.0";
 
   // ==========================================================
   // 0. 아주 작은 유틸
@@ -442,13 +442,24 @@
         body: JSON.stringify({
           model,
           temperature: 0,
+          max_tokens: 4096,
           messages: [{ role: "system", content: systemPrompt }, { role: "user", content: userPrompt }]
         })
       });
       const data = await res.json().catch(() => null);
       if (!res.ok) throw new Error("API 오류 (" + res.status + "): " + (data && data.error && data.error.message || res.statusText));
-      const text = data && data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
-      if (!text) throw new Error("응답에서 텍스트를 찾지 못했습니다.");
+      const msg = data && data.choices && data.choices[0] && data.choices[0].message;
+      let text = msg && msg.content;
+      // 일부 추론형 모델(GLM, DeepSeek 계열 등)은 최종 답을 content가 아니라
+      // reasoning_content 같은 별도 필드에 담아서 준다 — 그것도 확인해본다.
+      if (!text && msg && typeof msg.reasoning_content === "string" && msg.reasoning_content.trim()) {
+        text = msg.reasoning_content;
+      }
+      if (!text) {
+        const finishReason = data && data.choices && data.choices[0] && data.choices[0].finish_reason;
+        const keys = msg ? Object.keys(msg).join(",") : "(message 자체 없음)";
+        throw new Error(`응답에서 텍스트를 찾지 못했습니다. (finish_reason: ${finishReason || "?"}, message 필드: ${keys})`);
+      }
       const u2 = data && data.usage;
       const usage = u2 ? {
         input: u2.prompt_tokens || 0,
@@ -515,7 +526,8 @@
       "규칙:",
       "1. 원본 답변에 유저노트와 실제로 모순되는 문장/구절/상태값이 있을 때만 손댄다.",
       "2. 유저노트가 다루지 않거나, 원본이 그 화제를 그냥 언급하지 않고 넘어가는 경우는 모순이 아니다. 아무것도 추가하지 않는다.",
-      "3. 문체, 어투, 인칭, 문단 구성, 대사와 지문 배치, 상태창 라벨/형식은 절대 건드리지 않는다.",
+      "3. 원본 답변에서 고치지 않는 나머지 부분의 문체, 어투, 문단 구성, 대사와 지문 배치, 상태창 라벨/형식은",
+      "   절대 건드리지 않는다. (replace 자체의 시제/인칭 조정은 10번 규칙을 따른다.)",
       "4. find는 [제타 원본 답변]에 있는 문자열을 한 글자도 틀리지 않고 그대로 옮겨 적어야 한다 (요약·의역 금지).",
       "   상태창 값을 고칠 때도 'label: ' 부분은 빼고 값(value) 부분만 find로 잡는다.",
       "5. find가 원본 안에 여러 번 나올 수 있다. 그 경우 모든 위치에 같은 replace를 적용해도 뜻이 통하는 문구로 find를 잡는다.",
@@ -534,8 +546,14 @@
       "   만약 원본 안에 이미 있는 다른 문구가 지금 고치려는 내용과 서로 충돌한다면(예: 한쪽은 '아직 고백 안 함',",
       "   다른 한쪽은 '이미 고백함'), 그 충돌하는 다른 부분도 conflicts에 같이 추가해서 답변 전체가 앞뒤가",
       "   맞도록 만든다. 한 군데만 고치고 바로 근처의 모순을 그대로 방치하지 않는다.",
-      "10. 모순이 없으면 conflicts를 빈 배열로 반환한다.",
-      "11. 반드시 아래 JSON 형식 하나만 반환한다. 다른 설명이나 사과를 덧붙이지 않는다.",
+      "10. replace를 만들 때 [유저노트]의 문장을 그대로 베껴쓰지 않는다. 유저노트는 사실을 정리해둔 메모일 뿐,",
+      "    실제 대사가 아니다. [지금 답변하는 캐릭터]가 [이번 유저 메시지]를 보낸 상대에게 지금 이 순간 직접",
+      "    말하는 것처럼, 시제(과거형으로 쓰여있어도 '지금도 그렇다'는 뜻이면 현재형으로)와 인칭(노트에 3인칭으로",
+      "    적혀있어도 화자 본인 얘기면 '나는', 상대방 얘기면 '너는'으로)을 자연스럽게 바꿔서 쓴다.",
+      "    (예: 노트에 '재하는 승아를 3년동안 좋아했다'라고 적혀있어도, 재하 본인이 승아에게 직접 말하는",
+      "    상황이면 '나 너 3년 동안 좋아했어' 처럼 화자-청자 관계에 맞게 바꿔서 자연스러운 대사로 만든다.)",
+      "11. 모순이 없으면 conflicts를 빈 배열로 반환한다.",
+      "12. 반드시 아래 JSON 형식 하나만 반환한다. 다른 설명이나 사과를 덧붙이지 않는다.",
       "",
       '{"conflicts":[{"find":"원본 그대로의 문자열","replace":"고친 문자열","reason":"어떤 노트 내용과 왜 모순인지"}]}'
     ].join("\n");
