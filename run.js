@@ -270,9 +270,19 @@
     }
 
     if (provider === "openai" || provider === "compatible") {
-      const base = provider === "compatible" ? String(preset.baseUrl || "").replace(/\/+$/, "") : "https://api.openai.com/v1";
-      if (provider === "compatible" && !base) throw new Error("호환 API 기본 주소가 없습니다.");
-      const res = await fetch(base + "/chat/completions", {
+      let endpoint = "https://api.openai.com/v1/chat/completions";
+      if (provider === "compatible") {
+        const raw = String(preset.baseUrl || "").trim();
+        if (!raw) throw new Error("호환 API 기본 주소가 없습니다.");
+        let u;
+        try { u = new URL(raw); } catch { throw new Error("호환 API 기본 주소 형식이 올바르지 않습니다."); }
+        u.hash = ""; u.search = "";
+        u.pathname = u.pathname.replace(/\/+$/, "");
+        // 사용자가 이미 .../chat/completions까지 포함한 전체 엔드포인트를 붙여넣은 경우 중복으로 붙이지 않는다.
+        if (!/\/chat\/completions$/i.test(u.pathname)) u.pathname += "/chat/completions";
+        endpoint = u.toString();
+      }
+      const res = await fetch(endpoint, {
         method: "POST",
         headers: { "Content-Type": "application/json", "Authorization": "Bearer " + apiKey },
         body: JSON.stringify({
@@ -917,4 +927,3 @@
 
   console.log(`📝 Zeta UserNote Corrector v${VERSION} Ready`);
 })();
-
