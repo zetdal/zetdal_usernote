@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note Corrector
 // @namespace    zeta-usernote-corrector
-// @version      1.9.0
+// @version      2.0.0
 // @description  유저노트(글자수 제한 없음)를 별도 저장해두고, 제타가 노트 내용과 명백히 모순되는 답변을 낼 때만 그 부분만 find/replace로 고친다. 로어북/장기기억/페르소나는 건드리지 않고, 원본 문체·나머지 내용은 그대로 유지한다.
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -18,7 +18,7 @@
   }
   window.__ZETA_USERNOTE_CORRECTOR_RUNNING__ = true;
 
-  const VERSION = "1.9.0";
+  const VERSION = "2.0.0";
 
   // ==========================================================
   // 0. 아주 작은 유틸
@@ -140,18 +140,6 @@
       if (c && c.type === "TEXT" && typeof c.speakerName === "string" && c.speakerName.trim()) {
         const name = c.speakerName.trim();
         if (!names.includes(name)) names.push(name);
-      }
-    });
-    return names;
-  }
-
-  // TEXT 콘텐츠에 들어있는 speakerName들을 뽑아낸다 (지금 답변에서 실제로 말하고 있는 캐릭터 이름).
-  function extractSpeakerNames(contents) {
-    if (!Array.isArray(contents)) return [];
-    const names = [];
-    contents.forEach((c) => {
-      if (c && c.type === "TEXT" && typeof c.speakerName === "string" && c.speakerName.trim()) {
-        if (!names.includes(c.speakerName.trim())) names.push(c.speakerName.trim());
       }
     });
     return names;
@@ -285,6 +273,7 @@
   // ==========================================================
 
   const LS_NOTE_PREFIX = "zeta-unc-note-";
+  const LS_ROSTER_PREFIX = "zeta-unc-roster-"; // 방별 등장인물 목록 (쉼표 구분) - 노트 자동 필터링용
   const LS_PRESETS_KEY = "zeta-unc-api-presets";
   const LS_ACTIVE_PRESET_PREFIX = "zeta-unc-active-preset-";
   const LS_ENABLED_PREFIX = "zeta-unc-enabled-"; // 방별 on/off
@@ -294,6 +283,25 @@
   }
   function saveNote(roomId, text) {
     localStorage.setItem(LS_NOTE_PREFIX + roomId, text || "");
+  }
+
+  function getRoster(roomId) {
+    return localStorage.getItem(LS_ROSTER_PREFIX + roomId) || "";
+  }
+  function saveRoster(roomId, text) {
+    localStorage.setItem(LS_ROSTER_PREFIX + roomId, text || "");
+  }
+  // "재하, 선우, 승아" 같은 쉼표 구분 문자열을 이름 배열로 변환 (공백 제거, 빈 항목 제거, 중복 제거)
+  function parseRoster(text) {
+    const seen = new Set();
+    const out = [];
+    String(text || "").split(",").forEach((raw) => {
+      const name = raw.trim();
+      if (!name || seen.has(name)) return;
+      seen.add(name);
+      out.push(name);
+    });
+    return out;
   }
 
   function getEnabled(roomId) {
@@ -384,6 +392,47 @@
     const list = getPresets();
     const id = getActivePresetId(roomId);
     return list.find((p) => p.id === id) || list[0] || null;
+  }
+
+  // ==========================================================
+  // 1.5 노트 화자 필터링 (코드 레벨, AI 호출 없이 처리)
+  // ==========================================================
+  // 목적: AI에게 "이 노트 내용이 지금 화자와 관련 있는지"를 추론시키는 대신,
+  // 등장인물 이름 목록(roster)을 기준으로 코드가 미리 걸러낸다.
+  // - roster가 비어있으면 필터링을 하지 않고 노트 전체를 그대로 넘긴다 (기존 동작과 동일, 하위호환).
+  // - 노트는 빈 줄(빈 줄 하나 이상) 기준으로 "항목"으로 나눈다.
+  // - 각 항목 텍스트 안에 roster 이름이 몇 개가 등장하는지 본다.
+  //   - roster 이름이 하나도 안 나오면(일반적인 설정/전역 사실) -> 항상 포함
+  //   - 지금 화자 이름이 등장하면 -> 포함 (화자 본인 관련 사건이거나, 화자가 그 사건을 알고 있다는 근거로 봄)
+  //   - roster 이름은 나오는데 그 중에 지금 화자 이름이 전혀 없으면 -> 이번 화자와는 무관한 사건으로 보고 제외
+
+  function splitNoteEntries(note) {
+    return String(note || "")
+      .split(/\r?\n\s*\r?\n+/)
+      .map((s) => s.trim())
+      .filter(Boolean);
+  }
+
+  function filterNoteForSpeakers(note, speakerNames, rosterNames) {
+    const entries = splitNoteEntries(note);
+    if (!entries.length) return { text: "", keptCount: 0, totalCount: 0, filtered: false };
+
+    if (!Array.isArray(rosterNames) || !rosterNames.length) {
+      // roster 미설정 -> 필터링 안 함 (기존 동작 유지)
+      return { text: entries.join("\n\n"), keptCount: entries.length, totalCount: entries.length, filtered: false };
+    }
+
+    const speakers = (Array.isArray(speakerNames) ? speakerNames : []).filter(Boolean);
+
+    const kept = entries.filter((entry) => {
+      const mentionedRosterNames = rosterNames.filter((name) => entry.includes(name));
+      if (!mentionedRosterNames.length) return true; // 특정 인물 얘기가 아닌 일반 항목 -> 항상 포함
+      if (!speakers.length) return true; // 화자를 특정 못 하면 안전하게 포함 (걸러내지 않음)
+      const speakerMentioned = speakers.some((sp) => mentionedRosterNames.includes(sp) || entry.includes(sp));
+      return speakerMentioned;
+    });
+
+    return { text: kept.join("\n\n"), keptCount: kept.length, totalCount: entries.length, filtered: true };
   }
 
   // ==========================================================
@@ -519,6 +568,7 @@
     const system = [
       "당신은 대화 로그 검수자다. 아래 [유저노트]에 적힌 확정 사실·현재 상태와, [제타 원본 답변]을 대조한다.",
       "[지금 답변하는 캐릭터]는 이번 답변에서 실제로 말하고 있는 인물이다.",
+      "[유저노트]는 이미 지금 화자와 관련 있는 항목만 걸러져서 전달된 것이다 (관련 없는 다른 인물 단독 사건은 이미 제외됨).",
       "[제타 원본 답변]에는 대사/지문(TEXT) 외에 [상태창], [캐릭터명] 같은 대괄호 섹션이 있을 수 있는데,",
       "이건 그 답변에 같이 딸려온 상태창(날짜/장소/속마음 등) 정보를 라벨: 값 형태로 풀어놓은 것이다. 이 값들도 검수 대상이다.",
       "임무는 명백히 모순되는 부분만 찾아서 고치는 것이지, 전체를 다시 쓰는 것이 아니다.",
@@ -537,32 +587,27 @@
       "   (예: 노트에 '어제 부산에 놀러갔다가 오늘 집에 옴'이라고 적혀있는데, 원본 답변이 화자가 여전히 부산에 있는 것처럼",
       "   서술하면 -- '지금은 집에 있어야 한다'는 함의와 모순되는 것으로 본다.) 단, 노트에 안 적힌 화제까지 추측해서",
       "   새로 만들어내지는 않는다 -- 오직 노트 문장이 실제로 뜻하는 현재 상태와의 모순만 본다.",
-      "8. [유저노트]의 각 문장이 누구에 관한/누구 사이의 사건인지 먼저 판단한다. 그 사건의 당사자가 아니거나,",
-      "   그 사건을 알고 있다는 근거가 원본 답변 안에 없는 [지금 답변하는 캐릭터]의 대사에, 표현이 우연히 비슷하다는",
-      "   이유만으로 그 노트 내용을 끼워넣지 않는다. (예: '재하가 승아에게 고백했다가 거절당했다'는 재하·승아 둘만의",
-      "   사건인데, 완전히 다른 화제로 말하던 선우의 대사에 이 내용을 갖다 붙이지 않는다.) 노트가 명시한 당사자 본인의",
-      "   발언이거나, 원본 답변 자체에 그 인물이 그 사건을 알고 있다는 명확한 근거가 있을 때만 적용한다.",
-      "9. 수정을 반영했을 때, 그 수정 내용이 [제타 원본 답변]의 다른 부분과 새로 모순을 만들면 안 된다.",
+      "8. 수정을 반영했을 때, 그 수정 내용이 [제타 원본 답변]의 다른 부분과 새로 모순을 만들면 안 된다.",
       "   만약 원본 안에 이미 있는 다른 문구가 지금 고치려는 내용과 서로 충돌한다면(예: 한쪽은 '아직 고백 안 함',",
       "   다른 한쪽은 '이미 고백함'), 그 충돌하는 다른 부분도 conflicts에 같이 추가해서 답변 전체가 앞뒤가",
       "   맞도록 만든다. 한 군데만 고치고 바로 근처의 모순을 그대로 방치하지 않는다.",
-      "10. replace를 만들 때 [유저노트]의 문장을 그대로 베껴쓰지 않는다. 유저노트는 사실을 정리해둔 메모일 뿐,",
-      "    실제 대사가 아니다. [지금 답변하는 캐릭터]가 [이번 유저 메시지]를 보낸 상대에게 지금 이 순간 직접",
-      "    말하는 것처럼, 시제(과거형으로 쓰여있어도 '지금도 그렇다'는 뜻이면 현재형으로)와 인칭(노트에 3인칭으로",
-      "    적혀있어도 화자 본인 얘기면 '나는', 상대방 얘기면 '너는'으로)을 자연스럽게 바꿔서 쓴다.",
-      "    (예: 노트에 '재하는 승아를 3년동안 좋아했다'라고 적혀있어도, 재하 본인이 승아에게 직접 말하는",
-      "    상황이면 '나 너 3년 동안 좋아했어' 처럼 화자-청자 관계에 맞게 바꿔서 자연스러운 대사로 만든다.)",
-      "11. 유저노트 원문에 '~도', '역시', '마찬가지로'처럼 다른 인물과 비교하거나 같은 처지임을 나타내는",
+      "9. replace를 만들 때 [유저노트]의 문장을 그대로 베껴쓰지 않는다. 유저노트는 사실을 정리해둔 메모일 뿐,",
+      "   실제 대사가 아니다. [지금 답변하는 캐릭터]가 [이번 유저 메시지]를 보낸 상대에게 지금 이 순간 직접",
+      "   말하는 것처럼, 시제(과거형으로 쓰여있어도 '지금도 그렇다'는 뜻이면 현재형으로)와 인칭(노트에 3인칭으로",
+      "   적혀있어도 화자 본인 얘기면 '나는', 상대방 얘기면 '너는'으로)을 자연스럽게 바꿔서 쓴다.",
+      "   (예: 노트에 '재하는 승아를 3년동안 좋아했다'라고 적혀있어도, 재하 본인이 승아에게 직접 말하는",
+      "   상황이면 '나 너 3년 동안 좋아했어' 처럼 화자-청자 관계에 맞게 바꿔서 자연스러운 대사로 만든다.)",
+      "10. 유저노트 원문에 '~도', '역시', '마찬가지로'처럼 다른 인물과 비교하거나 같은 처지임을 나타내는",
       "    표현이 있으면, replace에도 그 뉘앙스를 그대로 살린다. 이런 표현을 빼고 밋밋한 단정문으로 바꾸지 않는다.",
       "    (예: 노트에 '선우도(재하처럼) 3년 동안 좋아했다'라고 적혀있으면, replace도 '나는 3년 동안'이 아니라",
       "    '나도 3년 동안'처럼 비교/공유의 의미를 유지해서 쓴다.)",
-      "12. 노트에 적힌 사건을 [이번 유저 메시지]를 보낸 상대방(청자) 본인이 이미 직접 겪은 당사자라면,",
+      "11. 노트에 적힌 사건을 [이번 유저 메시지]를 보낸 상대방(청자) 본인이 이미 직접 겪은 당사자라면,",
       "    그 사건을 상대방이 몰랐던 새로운 정보인 것처럼 처음부터 다시 설명/나열하는 문장을 만들지 않는다.",
       "    (예: 승아 본인이 재하에게 고백받고 거절한 당사자인데, 승아에게 '재하가 너한테 고백했었고, 너도",
       "    거절했었지'처럼 그 사건 자체를 새삼스럽게 되짚어 알려주지 않는다. 그 사실을 이미 전제로 깔고,",
       "    거기서 이어지는 감정/반응/화제만 자연스럽게 언급한다.)",
-      "13. 모순이 없으면 conflicts를 빈 배열로 반환한다.",
-      "14. 반드시 아래 JSON 형식 하나만 반환한다. 다른 설명이나 사과를 덧붙이지 않는다.",
+      "12. 모순이 없으면 conflicts를 빈 배열로 반환한다.",
+      "13. 반드시 아래 JSON 형식 하나만 반환한다. 다른 설명이나 사과를 덧붙이지 않는다.",
       "",
       '{"conflicts":[{"find":"원본 그대로의 문자열","replace":"고친 문자열","reason":"어떤 노트 내용과 왜 모순인지"}]}'
     ].join("\n");
@@ -898,8 +943,21 @@
   async function computeCorrection(roomId, userText, envelopeText, speakerNames) {
     const debug = getDebug(roomId);
 
-    const note = normalizeSpace(getNote(roomId));
-    if (!note) { if (debug) toast("📝 유저노트가 비어있어 건너뜀", false); return { skip: true }; }
+    const rawNote = normalizeSpace(getNote(roomId)) ? getNote(roomId) : "";
+    if (!normalizeSpace(rawNote)) { if (debug) toast("📝 유저노트가 비어있어 건너뜀", false); return { skip: true }; }
+
+    const rosterNames = parseRoster(getRoster(roomId));
+    const filterResult = filterNoteForSpeakers(rawNote, speakerNames, rosterNames);
+    const note = filterResult.text;
+
+    if (!normalizeSpace(note)) {
+      if (debug) toast("✅ 등장인물 필터링 결과 이 화자(" + (speakerNames && speakerNames.join(",") || "?") + ")와 관련된 노트 항목 없음 — 건너뜀", false);
+      return { skip: true };
+    }
+
+    if (debug && filterResult.filtered) {
+      toast("🧹 노트 필터링: 전체 " + filterResult.totalCount + "개 항목 중 " + filterResult.keptCount + "개만 대조에 사용 (화자: " + (speakerNames && speakerNames.join(",") || "?") + ")", false);
+    }
 
     const preset = getActivePreset(roomId);
     if (!preset) { toast("❌ 사용할 API 프리셋이 없습니다.", true); return { skip: true }; }
@@ -1343,7 +1401,9 @@
     padding: 8px; font-size: 12px; margin-top: 4px;
   }
   textarea { height: 30vh; resize: vertical; }
+  textarea.roster { height: auto; min-height: 44px; resize: vertical; }
   label { display: block; font-size: 11px; color: #ccc; margin-top: 8px; }
+  .hint { font-size: 10px; color: #888; margin-top: 3px; line-height: 1.4; }
   .row { display: flex; gap: 6px; margin-top: 8px; align-items: center; }
   .row.check { align-items: center; gap: 6px; }
   button { background: #333; color: #fff; border: none; border-radius: 8px; padding: 7px 6px; font-size: 11px; cursor: pointer; flex: 1; }
@@ -1379,7 +1439,13 @@
       <input type="checkbox" id="debugMode" style="width:auto;margin:0;">
       <label style="margin:0;">디버그 로그 보기 (평소엔 꺼두세요)</label>
     </div>
-    <textarea id="note" placeholder="유저노트 글자수가 늘어나면 API 설정란의 토큰 사용량도 같이 늘어납니다.&#10;글자수/비용은 API 설정 탭에서 확인하며 조절하세요.&#10;&#10;출력 방식/규칙(예: 짧게 출력, 내레이션 금지 등)은 이 기능으로는 반영되지 않습니다."></textarea>
+
+    <label>등장인물 목록 (쉼표로 구분, 예: 재하,선우,승아)
+      <textarea id="roster" class="roster" placeholder="예: 재하,선우,승아"></textarea>
+    </label>
+    <div class="hint">여기 적은 이름을 기준으로, 노트 항목마다 "지금 화자와 관련 있는 항목인지"를 자동으로 걸러서 AI에게 넘깁니다. 비워두면 필터링 없이 노트 전체를 매번 넘깁니다.</div>
+
+    <textarea id="note" placeholder="유저노트 글자수가 늘어나면 API 설정란의 토큰 사용량도 같이 늘어납니다.&#10;글자수/비용은 API 설정 탭에서 확인하며 조절하세요.&#10;&#10;노트는 빈 줄로 항목을 구분해서 적어주세요 (등장인물 필터링이 항목 단위로 작동합니다).&#10;&#10;출력 방식/규칙(예: 짧게 출력, 내레이션 금지 등)은 이 기능으로는 반영되지 않습니다."></textarea>
     <div class="count" id="count">0자</div>
     <div class="row">
       <button class="primary" id="saveNote">저장</button>
@@ -1432,6 +1498,7 @@
   const btnEl = el("btn");
   const panelEl = el("panel");
   const noteEl = el("note");
+  const rosterEl = el("roster");
   const roomEl = el("room");
   const countEl = el("count");
   const savedEl = el("saved");
@@ -1504,6 +1571,7 @@
   function refreshRoomUI() {
     roomEl.textContent = "Room: " + (roomId ? roomId.slice(0, 24) : "(감지 안 됨)");
     noteEl.value = getNote(roomId);
+    rosterEl.value = getRoster(roomId);
     enabledEl.checked = getEnabled(roomId);
     debugModeEl.checked = getDebug(roomId);
     updateCount();
@@ -1521,6 +1589,7 @@
   noteEl.addEventListener("input", () => { updateCount(); });
   el("saveNote").addEventListener("click", () => {
     saveNote(roomId, noteEl.value);
+    saveRoster(roomId, rosterEl.value);
     flashSaved("저장됨");
   });
   enabledEl.addEventListener("change", () => setEnabled(roomId, enabledEl.checked));
