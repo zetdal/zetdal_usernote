@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note Corrector
 // @namespace    zeta-usernote-corrector
-// @version      1.6.1
+// @version      1.7.0
 // @description  유저노트(글자수 제한 없음)를 별도 저장해두고, 제타가 노트 내용과 명백히 모순되는 답변을 낼 때만 그 부분만 find/replace로 고친다. 로어북/장기기억/페르소나는 건드리지 않고, 원본 문체·나머지 내용은 그대로 유지한다.
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -18,7 +18,7 @@
   }
   window.__ZETA_USERNOTE_CORRECTOR_RUNNING__ = true;
 
-  const VERSION = "1.6.1";
+  const VERSION = "1.7.0";
 
   // ==========================================================
   // 0. 아주 작은 유틸
@@ -132,7 +132,32 @@
     return parts.filter(Boolean).join("\n\n").trim();
   }
 
-  // 제타 스트리밍 응답 전체(SSE)에서: 완성된 답변 텍스트(TEXT+INFO_BOX 포함) + messageId + candidateId를 뽑아낸다.
+  // TEXT 콘텐츠에 있는 speakerName들을 모은다 (지금 답변에서 실제로 "말하고 있는" 캐릭터가 누구인지).
+  function extractSpeakerNames(contents) {
+    if (!Array.isArray(contents)) return [];
+    const names = [];
+    contents.forEach((c) => {
+      if (c && c.type === "TEXT" && typeof c.speakerName === "string" && c.speakerName.trim()) {
+        const name = c.speakerName.trim();
+        if (!names.includes(name)) names.push(name);
+      }
+    });
+    return names;
+  }
+
+  // TEXT 콘텐츠에 들어있는 speakerName들을 뽑아낸다 (지금 답변에서 실제로 말하고 있는 캐릭터 이름).
+  function extractSpeakerNames(contents) {
+    if (!Array.isArray(contents)) return [];
+    const names = [];
+    contents.forEach((c) => {
+      if (c && c.type === "TEXT" && typeof c.speakerName === "string" && c.speakerName.trim()) {
+        if (!names.includes(c.speakerName.trim())) names.push(c.speakerName.trim());
+      }
+    });
+    return names;
+  }
+
+  // 제타 스트리밍 응답 전체(SSE)에서: 완성된 답변 텍스트(TEXT+INFO_BOX 포함) + messageId + candidateId + 화자를 뽑아낸다.
   // 새 메시지 전송(CHAT_COMPLETE)과 리롤/다시받기(CANDIDATE_COMPLETE) 둘 다 명시적으로 처리한다.
   function extractReplyEnvelope(responseText) {
     const events = parseSse(responseText);
@@ -142,6 +167,7 @@
     const ids = { requestId: "", messageId: "", candidateId: "" };
     const uuidish = [];
     let completeText = "";
+    let speakers = [];
 
     events.forEach((event) => {
       if (!event || typeof event !== "object") return;
@@ -152,14 +178,20 @@
         if (reply.id) ids.messageId = String(reply.id);
         if (reply.candidateId) ids.candidateId = String(reply.candidateId);
         if (event.requestId) ids.requestId = String(event.requestId);
-        if (Array.isArray(reply.contents)) completeText = serializeContents(reply.contents);
+        if (Array.isArray(reply.contents)) {
+          completeText = serializeContents(reply.contents);
+          speakers = extractSpeakerNames(reply.contents);
+        }
       }
 
       // 리롤("다시 받기") 응답은 CHAT_COMPLETE가 아니라 CANDIDATE_COMPLETE로 온다.
       if (evType === "CANDIDATE_COMPLETE" && event.candidate) {
         const cand = event.candidate;
         if (cand.id) ids.candidateId = String(cand.id);
-        if (Array.isArray(cand.contents)) completeText = serializeContents(cand.contents);
+        if (Array.isArray(cand.contents)) {
+          completeText = serializeContents(cand.contents);
+          speakers = extractSpeakerNames(cand.contents);
+        }
       }
 
       walk(event, "", (value, path) => {
@@ -197,7 +229,7 @@
     if (!text && cumulative.length) text = pickLongest(cumulative).trim();
     if (!text) text = pickLongest(finals).trim();
 
-    return { text, requestId: ids.requestId, messageId: ids.messageId, candidateId: ids.candidateId };
+    return { text, requestId: ids.requestId, messageId: ids.messageId, candidateId: ids.candidateId, speakers };
   }
 
   function isStreamEndpoint(url, method) {
@@ -468,9 +500,14 @@
   // 3. 프롬프트 구성 (find/replace conflict 방식)
   // ==========================================================
 
-  function buildCorrectionPrompt(note, userText, originalReply) {
+  function buildCorrectionPrompt(note, userText, originalReply, speakerNames) {
+    const speakerLine = (Array.isArray(speakerNames) && speakerNames.length)
+      ? speakerNames.join(", ")
+      : "(알 수 없음)";
+
     const system = [
       "당신은 대화 로그 검수자다. 아래 [유저노트]에 적힌 확정 사실·현재 상태와, [제타 원본 답변]을 대조한다.",
+      "[지금 답변하는 캐릭터]는 이번 답변에서 실제로 말하고 있는 인물이다.",
       "[제타 원본 답변]에는 대사/지문(TEXT) 외에 [상태창], [캐릭터명] 같은 대괄호 섹션이 있을 수 있는데,",
       "이건 그 답변에 같이 딸려온 상태창(날짜/장소/속마음 등) 정보를 라벨: 값 형태로 풀어놓은 것이다. 이 값들도 검수 대상이다.",
       "임무는 명백히 모순되는 부분만 찾아서 고치는 것이지, 전체를 다시 쓰는 것이 아니다.",
@@ -488,13 +525,21 @@
       "   (예: 노트에 '어제 부산에 놀러갔다가 오늘 집에 옴'이라고 적혀있는데, 원본 답변이 화자가 여전히 부산에 있는 것처럼",
       "   서술하면 -- '지금은 집에 있어야 한다'는 함의와 모순되는 것으로 본다.) 단, 노트에 안 적힌 화제까지 추측해서",
       "   새로 만들어내지는 않는다 -- 오직 노트 문장이 실제로 뜻하는 현재 상태와의 모순만 본다.",
-      "8. 모순이 없으면 conflicts를 빈 배열로 반환한다.",
-      "9. 반드시 아래 JSON 형식 하나만 반환한다. 다른 설명이나 사과를 덧붙이지 않는다.",
+      "8. [유저노트]의 각 문장이 누구에 관한/누구 사이의 사건인지 먼저 판단한다. 그 사건의 당사자가 아니거나,",
+      "   그 사건을 알고 있다는 근거가 원본 답변 안에 없는 [지금 답변하는 캐릭터]의 대사에, 표현이 우연히 비슷하다는",
+      "   이유만으로 그 노트 내용을 끼워넣지 않는다. (예: '재하가 승아에게 고백했다가 거절당했다'는 재하·승아 둘만의",
+      "   사건인데, 완전히 다른 화제로 말하던 선우의 대사에 이 내용을 갖다 붙이지 않는다.) 노트가 명시한 당사자 본인의",
+      "   발언이거나, 원본 답변 자체에 그 인물이 그 사건을 알고 있다는 명확한 근거가 있을 때만 적용한다.",
+      "9. 모순이 없으면 conflicts를 빈 배열로 반환한다.",
+      "10. 반드시 아래 JSON 형식 하나만 반환한다. 다른 설명이나 사과를 덧붙이지 않는다.",
       "",
       '{"conflicts":[{"find":"원본 그대로의 문자열","replace":"고친 문자열","reason":"어떤 노트 내용과 왜 모순인지"}]}'
     ].join("\n");
 
     const user = [
+      "[지금 답변하는 캐릭터]",
+      speakerLine,
+      "",
       "[유저노트]",
       note,
       "",
@@ -819,7 +864,7 @@
     localStorage.setItem("zeta-unc-debug-" + roomId, on ? "1" : "0");
   }
 
-  async function computeCorrection(roomId, userText, envelopeText) {
+  async function computeCorrection(roomId, userText, envelopeText, speakerNames) {
     const debug = getDebug(roomId);
 
     const note = normalizeSpace(getNote(roomId));
@@ -831,7 +876,7 @@
     if (debug) toast("⏳ 답변 캡처됨 (" + envelopeText.length + "자) → AI에 대조 요청 중... (표시가 잠시 지연됩니다)", false);
 
     try {
-      const { system, user } = buildCorrectionPrompt(note, userText, envelopeText);
+      const { system, user } = buildCorrectionPrompt(note, userText, envelopeText, speakerNames);
       const aiRes = await callAI(preset, system, user);
       const raw = aiRes && aiRes.text;
       const usage = aiRes && aiRes.usage;
@@ -890,7 +935,7 @@
     }
 
     await new Promise((r) => setTimeout(r, 250));
-    const outcome = await computeCorrection(roomId, userText, envelope.text);
+    const outcome = await computeCorrection(roomId, userText, envelope.text, envelope.speakers);
     if (outcome.skip) return;
 
     let patchedAny = false;
@@ -979,7 +1024,7 @@
         for (let i = 0; i < 100; i++) processedKeys.delete(it.next().value);
       }
 
-      const outcome = await computeCorrection(roomId, userText, envelope.text);
+      const outcome = await computeCorrection(roomId, userText, envelope.text, envelope.speakers);
       if (outcome.skip) return passthroughResponse(response, rawText);
 
       const patchResult = applyCorrectionsToRawText(rawText, outcome.applied);
@@ -1170,7 +1215,7 @@
               const it = processedKeys.values();
               for (let i = 0; i < 100; i++) processedKeys.delete(it.next().value);
             }
-            const outcome = await computeCorrection(roomId, userText, envelope.text);
+            const outcome = await computeCorrection(roomId, userText, envelope.text, envelope.speakers);
             if (!outcome.skip) {
               const patched = applyCorrectionsToRawText(rawText, outcome.applied);
               if (patched.changed) {
