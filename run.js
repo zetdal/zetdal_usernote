@@ -1014,8 +1014,11 @@
   }
 
   // 방(roomId)별로 로어북/{{char}} 상세를 캐싱한다 (매 메시지마다 새로 긁어오면 느리고 API 호출도 낭비).
-  // {{user}} 상세(페르소나)는 자주 바뀔 수 있어 매번 새로 가져온다.
+  // {{user}} 상세(페르소나)는 자주 바뀔 수 있어서 완전히 캐싱하진 않지만, 매 메시지마다 다시 긁어오면 그것도
+  // 느려지므로 PERSONA_TTL_MS 동안만 짧게 캐싱한다 (그 안에 프로필을 바꿨으면 새로고침 버튼으로 강제 갱신).
   const roomContextCache = {};
+  const personaCache = {}; // roomId -> { text, ts }
+  const PERSONA_TTL_MS = 60000;
 
   async function getRoomContext(roomId, forceRefresh) {
     if (!forceRefresh && roomContextCache[roomId]) return roomContextCache[roomId];
@@ -1033,6 +1036,14 @@
     };
     roomContextCache[roomId] = ctx;
     return ctx;
+  }
+
+  async function getPersonaTextCached(roomId, plotId, forceRefresh) {
+    const cached = personaCache[roomId];
+    if (!forceRefresh && cached && (Date.now() - cached.ts) < PERSONA_TTL_MS) return cached.text;
+    const text = await fetchPersonaText(roomId, plotId);
+    personaCache[roomId] = { text, ts: Date.now() };
+    return text;
   }
 
   // 구조화된 contents(TEXT+INFO_BOX)를 통째로 교체하는 패치 — find/replace가 아니라
@@ -1100,15 +1111,17 @@
 
     if (!capturedAuth) { if (debug) toast("⚠ 아직 인증 토큰을 못 잡아서 로어북/캐릭상세를 못 가져옴", true); return { skip: true }; }
 
+    const t0 = performance.now();
     const roomCtx = await getRoomContext(roomId);
     if (!roomCtx) { if (debug) toast("⚠ plotId/캐릭터 상세를 못 가져옴", true); return { skip: true }; }
 
-    const personaText = await fetchPersonaText(roomId, roomCtx.plotId);
+    const personaText = await getPersonaTextCached(roomId, roomCtx.plotId);
+    const tCtx = performance.now();
 
     const originalFormatted = contentsToRewriteFormat(envelope.contents);
     if (!originalFormatted) { if (debug) toast("⚠ 원본 답변을 재작성용 포맷으로 변환 못 함", true); return { skip: true }; }
 
-    if (debug) toast(`⏳ 전체 재작성 모드: 컨텍스트(로어북 ${roomCtx.lorebookText.length}자 + 캐릭상세 ${roomCtx.charDetailText.length}자) 포함해서 AI 호출 중...`, false);
+    if (debug) toast(`⏳ 전체 재작성 모드: 컨텍스트(로어북 ${roomCtx.lorebookText.length}자 + 캐릭상세 ${roomCtx.charDetailText.length}자) 포함해서 AI 호출 중... (컨텍스트 준비 ${Math.round(tCtx - t0)}ms)`, false);
 
     try {
       const { system, user } = buildFullRewritePrompt(
@@ -1117,13 +1130,14 @@
         originalFormatted
       );
       const aiRes = await callAI(preset, system, user);
+      const tAi = performance.now();
       const rewritten = aiRes && aiRes.text;
       const usage = aiRes && aiRes.usage;
 
       if (usage) {
         const stats = recordTokenUsage(roomId, usage);
         if (debug) {
-          toast(`🔢 이번 호출 토큰: 입력 ${usage.input} + 출력 ${usage.output} = ${usage.total} (이 방 누적 ${stats.room ? stats.room.total : "?"})`, false);
+          toast(`🔢 이번 호출 토큰: 입력 ${usage.input} + 출력 ${usage.output} = ${usage.total} (이 방 누적 ${stats.room ? stats.room.total : "?"}) / AI 호출 ${Math.round(tAi - tCtx)}ms, 총 ${Math.round(tAi - t0)}ms`, false);
         }
         refreshTokenUI();
       }
@@ -1481,14 +1495,15 @@
 
     // 부분 수정(find/replace) 모드도 전체 재작성 모드와 동일하게 로어북/캐릭터 상세/{{user}} 상세를 참고 자료로 같이 준다.
     // 이 컨텍스트를 못 가져와도(토큰 미확보, 네트워크 실패 등) 기능이 죽지 않고 노트만으로 대조를 계속한다.
+    const t0 = performance.now();
     let ctx = {};
     if (capturedAuth) {
       try {
         const roomCtx = await getRoomContext(roomId);
         if (roomCtx) {
-          const personaText = await fetchPersonaText(roomId, roomCtx.plotId);
+          const personaText = await getPersonaTextCached(roomId, roomCtx.plotId);
           ctx = { lorebookText: roomCtx.lorebookText, charDetailText: roomCtx.charDetailText, personaText };
-          if (debug) toast(`🔗 컨텍스트 포함: 로어북 ${roomCtx.lorebookText.length}자 + 캐릭상세 ${roomCtx.charDetailText.length}자 + 유저상세 ${(personaText || "").length}자`, false);
+          if (debug) toast(`🔗 컨텍스트 포함: 로어북 ${roomCtx.lorebookText.length}자 + 캐릭상세 ${roomCtx.charDetailText.length}자 + 유저상세 ${(personaText || "").length}자 (준비 ${Math.round(performance.now() - t0)}ms)`, false);
         } else if (debug) {
           toast("⚠ plotId/캐릭터 상세를 못 가져와서 노트만으로 대조함", false);
         }
@@ -1498,12 +1513,14 @@
     } else if (debug) {
       toast("⚠ 아직 인증 토큰을 못 잡아서 노트만으로 대조함", false);
     }
+    const tCtx = performance.now();
 
     if (debug) toast("⏳ 답변 캡처됨 (" + envelopeText.length + "자) → AI에 대조 요청 중... (표시가 잠시 지연됩니다)", false);
 
     try {
       const { system, user } = buildCorrectionPrompt(note, userText, envelopeText, speakerNames, ctx);
       const aiRes = await callAI(preset, system, user);
+      const tAi = performance.now();
       const raw = aiRes && aiRes.text;
       const usage = aiRes && aiRes.usage;
 
@@ -1512,14 +1529,15 @@
         if (debug) {
           toast(
             `🔢 이번 호출 토큰: 입력 ${usage.input} + 출력 ${usage.output} = ${usage.total} ` +
-            `(이 방 누적 ${stats.room ? stats.room.total : "?"}, 전체 누적 ${stats.global.total}, ${stats.global.calls}회 호출)`,
+            `(이 방 누적 ${stats.room ? stats.room.total : "?"}, 전체 누적 ${stats.global.total}, ${stats.global.calls}회 호출) ` +
+            `/ 컨텍스트 준비 ${Math.round(tCtx - t0)}ms, AI 호출 ${Math.round(tAi - tCtx)}ms, 총 ${Math.round(tAi - t0)}ms`,
             false
           );
         }
         console.log("📝 UserNoteCorrector 토큰 사용:", usage, "누적:", stats);
         refreshTokenUI();
       } else if (debug) {
-        toast("ℹ 이 API는 응답에 토큰 사용량을 안 줘서 집계 불가", false);
+        toast("ℹ 이 API는 응답에 토큰 사용량을 안 줘서 집계 불가 (컨텍스트 준비 " + Math.round(tCtx - t0) + "ms, AI 호출 " + Math.round(tAi - tCtx) + "ms)", false);
       }
 
       const parsed = parseModelJson(raw);
@@ -2040,7 +2058,7 @@
     </div>
     <div class="status" id="rewriteContextStatus" style="display:none;">아직 안 불러옴</div>
     <div class="row" id="rewriteContextRefreshRow" style="display:none;">
-      <button id="rewriteContextRefresh">로어북/캐릭상세 새로고침</button>
+      <button id="rewriteContextRefresh">로어북/캐릭상세/유저상세 새로고침</button>
     </div>
     <textarea id="note" placeholder="유저노트 글자수가 늘어나면 API 설정란의 토큰 사용량도 같이 늘어납니다.&#10;글자수/비용은 API 설정 탭에서 확인하며 조절하세요.&#10;&#10;출력 방식/규칙(예: 짧게 출력, 내레이션 금지 등)은 이 기능으로는 반영되지 않습니다."></textarea>
     <div class="count" id="count">0자</div>
@@ -2208,6 +2226,7 @@
 
   rewriteContextRefreshBtn.addEventListener("click", () => {
     delete roomContextCache[roomId];
+    delete personaCache[roomId];
     refreshRewriteContextUI(true);
   });
 
