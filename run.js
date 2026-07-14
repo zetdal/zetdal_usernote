@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Zeta User Note Corrector
 // @namespace    zeta-usernote-corrector
-// @version      2.0.1
+// @version      2.1.0
 // @description  유저노트(글자수 제한 없음)를 별도 저장해두고, 제타가 노트 내용과 명백히 모순되는 답변을 낼 때만 그 부분만 find/replace로 고친다. 로어북/장기기억/페르소나는 건드리지 않고, 원본 문체·나머지 내용은 그대로 유지한다.
 // @match        https://zeta-ai.io/*
 // @match        https://*.zeta-ai.io/*
@@ -18,7 +18,7 @@
   }
   window.__ZETA_USERNOTE_CORRECTOR_RUNNING__ = true;
 
-  const VERSION = "2.0.1";
+  const VERSION = "2.1.0";
 
   // ==========================================================
   // 0. 아주 작은 유틸
@@ -312,6 +312,16 @@
     localStorage.setItem(LS_ENABLED_PREFIX + roomId, on ? "1" : "0");
   }
 
+  // ---- 교정 모드 : "conflict"(기존 find/replace) 또는 "full"(완성 답변 통째 재작성 후 자동 diff) ----
+  const LS_MODE_PREFIX = "zeta-unc-mode-";
+  function getMode(roomId) {
+    const v = localStorage.getItem(LS_MODE_PREFIX + roomId);
+    return v === "full" ? "full" : "conflict"; // 기본값은 항상 기존 방식
+  }
+  function setMode(roomId, mode) {
+    localStorage.setItem(LS_MODE_PREFIX + roomId, mode === "full" ? "full" : "conflict");
+  }
+
   // ---- 이미 적용했던 교정 내용 기억 (스트림 이후 다른 API가 원본으로 덮어쓰는 것을 방지) ----
   const LS_CORR_PREFIX = "zeta-unc-corrections-";
 
@@ -600,12 +610,22 @@
       "   만약 원본 안에 이미 있는 다른 문구가 지금 고치려는 내용과 서로 충돌한다면(예: 한쪽은 '아직 고백 안 함',",
       "   다른 한쪽은 '이미 고백함'), 그 충돌하는 다른 부분도 conflicts에 같이 추가해서 답변 전체가 앞뒤가",
       "   맞도록 만든다. 한 군데만 고치고 바로 근처의 모순을 그대로 방치하지 않는다.",
+      "   이런 연쇄 충돌은 특히 [상태창] 값에서 잘 발생한다. 대사/지문을 고쳤는데 상태창의 감정/장소/관계",
+      "   항목이 그대로 남아 어긋나는 경우가 흔하다.",
+      "   (예: 노트 때문에 대사를 '이제 괜찮아졌어'로 고쳤는데, 같은 답변의 상태창에 '감정: 극도의 불안'이",
+      "   그대로 남아있으면, 이것도 함께 conflicts에 넣어 상태창 쪽 감정값도 누그러뜨린다.)",
+      "   (예: 노트 때문에 화자의 위치를 '집'으로 고쳤는데, 상태창의 '장소'가 여전히 '폐병원'으로 남아있으면",
+      "   상태창 장소 값도 함께 고친다.)",
       "10. replace를 만들 때 [유저노트]의 문장을 그대로 베껴쓰지 않는다. 유저노트는 사실을 정리해둔 메모일 뿐,",
       "    실제 대사가 아니다. [지금 답변하는 캐릭터]가 [이번 유저 메시지]를 보낸 상대에게 지금 이 순간 직접",
       "    말하는 것처럼, 시제(과거형으로 쓰여있어도 '지금도 그렇다'는 뜻이면 현재형으로)와 인칭(노트에 3인칭으로",
       "    적혀있어도 화자 본인 얘기면 '나는', 상대방 얘기면 '너는'으로)을 자연스럽게 바꿔서 쓴다.",
       "    (예: 노트에 '재하는 젯시를 3년동안 좋아했다'라고 적혀있어도, 재하 본인이 젯시에게 직접 말하는",
       "    상황이면 '나 너 3년 동안 좋아했어' 처럼 화자-청자 관계에 맞게 바꿔서 자연스러운 대사로 만든다.)",
+      "    (예: 노트에 '승아는 그 사실을 이미 알고 있었다'라고 적혀있고, 화자가 승아 본인이 아니라 승아에게",
+      "    말을 거는 상대방이면 -- '너 이미 알고 있었잖아'처럼 2인칭으로 바꾼다.)",
+      "    (예: 노트에 '재하는 3년째 그 카페에서 일했다'처럼 과거형이지만 지금도 유효한 사실이면,",
+      "    화자 본인 얘기일 때 '나 3년째 여기서 일해'처럼 현재형 1인칭으로 바꾼다.)",
       "11. 유저노트 원문에 '~도', '역시', '마찬가지로'처럼 다른 인물과 비교하거나 같은 처지임을 나타내는",
       "    표현이 있으면, replace에도 그 뉘앙스를 그대로 살린다. 이런 표현을 빼고 밋밋한 단정문으로 바꾸지 않는다.",
       "    (예: 노트에 '선우도(재하처럼) 3년 동안 좋아했다'라고 적혀있으면, replace도 '나는 3년 동안'이 아니라",
@@ -636,6 +656,149 @@
     ].join("\n");
 
     return { system, user };
+  }
+
+  // ==========================================================
+  // 3.1 "전체 교체" 모드 : 완성된 답변을 통째로 다시 쓰게 한 뒤,
+  //      원본과 블록 단위로 자동 diff해서 conflicts 배열로 변환한다.
+  //      (find/replace 모드와 똑같은 안전장치를 그대로 재사용하기 위함)
+  // ==========================================================
+
+  function buildFullReplacePrompt(note, userText, originalReply, speakerNames) {
+    const speakerLine = (Array.isArray(speakerNames) && speakerNames.length)
+      ? speakerNames.join(", ")
+      : "(알 수 없음)";
+
+    const system = [
+      "당신은 대화 로그 검수자다. 아래 [유저노트]에 적힌 확정 사실·현재 상태와, [제타 원본 답변]을 대조해서,",
+      "노트와 명백히 모순되는 부분만 고친 최종 답변 전체를 다시 작성한다.",
+      "[지금 답변하는 캐릭터]는 이번 답변에서 실제로 말하고 있는 인물이다.",
+      "[유저노트]는 이미 지금 화자와 관련 있는 항목만 걸러져서 전달된 것이다.",
+      "",
+      "[제타 원본 답변]은 빈 줄로 구분된 여러 블록으로 이루어져 있다.",
+      "각 블록은 순수 대사/지문 블록이거나, '[상태창]' 또는 '[캐릭터명]'으로 시작해서",
+      "'라벨: 값' 형태의 줄들이 이어지는 상태창 블록이다.",
+      "",
+      "출력 형식 (반드시 지킬 것):",
+      "1. 원본과 정확히 같은 개수의 블록을, 정확히 같은 순서로 출력한다. 블록을 추가하거나 삭제하지 않는다.",
+      "2. 상태창 블록은 원본과 정확히 같은 줄 수를 유지하고, 각 줄의 '라벨:' 부분은 절대 바꾸지 않는다.",
+      "   값(라벨 뒤의 내용)만 필요할 때 고친다.",
+      "3. 수정할 필요가 없는 블록/줄은 원본 글자 하나 안 틀리고 그대로 옮겨 적는다 (다듬거나 요약하지 않는다).",
+      "4. 노트와 실제로 모순되는 부분만 최소한으로 고친다. 전체를 새로 쓰거나 문체를 바꾸지 않는다.",
+      "5. JSON이나 설명, 이유, 마크다운 코드펜스 없이, 블록 텍스트만 그대로 출력한다.",
+      "",
+      "모순 판단 규칙:",
+      "a. 유저노트 문장에 '어제/오늘/방금/지금' 같은 과거→현재 시간 표현이 있으면, 그 문장이 뜻하는",
+      "   현재 상태까지 추론해서 대조한다. 노트에 안 적힌 화제까지 추측해서 새로 만들어내지 않는다.",
+      "b. 유저노트 문장에 '내일/다음 주/이따가/~할 예정' 같은 아직 오지 않은 시점 표현이 있으면,",
+      "   그 사건은 예정된 미래 계획일 뿐이다. 원본 답변 속 장면이 실제로 그 미래 시점에 도달한 것이",
+      "   명백한 경우(날짜/장소가 노트가 가리키는 시점과 일치)가 아니라면, 이런 노트 항목은 절대",
+      "   지금 진행 중인 일처럼 반영하지 않는다. 애매하면 손대지 않는다.",
+      "c. replace할 때 [유저노트] 문장을 그대로 베끼지 않는다. [지금 답변하는 캐릭터]가 [이번 유저 메시지]를",
+      "   보낸 상대에게 지금 이 순간 직접 말하듯, 시제(현재도 유효하면 현재형)와 인칭(화자 본인 얘기면 '나는',",
+      "   상대방 얘기면 '너는')을 자연스럽게 바꿔서 쓴다.",
+      "   (예: 노트 '재하는 젯시를 3년동안 좋아했다' + 재하 본인이 젯시에게 말하는 상황 → '나 너 3년 동안 좋아했어')",
+      "   (예: 노트 '승아는 그 사실을 이미 알고 있었다' + 화자가 승아 상대방 → '너 이미 알고 있었잖아')",
+      "d. 노트 원문에 '~도/역시/마찬가지로'처럼 비교·공유 뉘앙스가 있으면 그 뉘앙스를 살린다.",
+      "   (예: '선우도 3년 동안 좋아했다' → '나도 3년 동안'처럼, '나는'으로 밋밋하게 바꾸지 않는다.)",
+      "e. 노트에 적힌 사건을 [이번 유저 메시지]를 보낸 상대방 본인이 이미 겪은 당사자라면, 그 사건을",
+      "   상대방이 몰랐던 새 정보처럼 처음부터 다시 설명하지 않는다. 이미 아는 전제로 두고 이어지는",
+      "   감정/반응만 자연스럽게 언급한다.",
+      "f. 한 곳을 고치면서 답변의 다른 부분(특히 상태창의 감정/장소/관계 값)과 새로 모순이 생기면 안 된다.",
+      "   본문을 고쳤으면 관련된 상태창 값도 함께 자연스럽게 맞춘다.",
+      "   (예: 대사를 '이제 괜찮아졌어'로 고쳤는데 상태창에 '감정: 극도의 불안'이 남아있으면 그 값도 고친다.)",
+      "g. 모순이 없으면 원본을 단 한 글자도 바꾸지 말고 그대로 출력한다."
+    ].join("\n");
+
+    const user = [
+      "[지금 답변하는 캐릭터]",
+      speakerLine,
+      "",
+      "[유저노트]",
+      note,
+      "",
+      "[이번 유저 메시지]",
+      userText || "(없음)",
+      "",
+      "[제타 원본 답변]",
+      originalReply
+    ].join("\n");
+
+    return { system, user };
+  }
+
+  // originalReply / revisedReply를 "\n\n" 기준 블록으로 나눈다.
+  // serializeContents가 부분들을 "\n\n"으로 join하는 방식과 대응된다.
+  function splitEnvelopeBlocks(text) {
+    return String(text || "").split(/\n\n+/).map((b) => b.trim()).filter(Boolean);
+  }
+
+  // 상태창류 블록("[라벨]"로 시작)의 각 줄을 "라벨: 값" 기준으로 분리한다.
+  function splitLabelValue(line) {
+    const idx = line.indexOf(": ");
+    if (idx === -1) return null;
+    return { label: line.slice(0, idx), value: line.slice(idx + 2) };
+  }
+
+  // 전체 교체 모드의 핵심 안전장치: AI가 다시 쓴 전체 답변을 원본과 블록 단위로 비교해서,
+  // 실제로 바뀐 부분만 찾아 find/replace 쌍으로 변환한다.
+  // - 블록 개수가 다르면 전체를 신뢰할 수 없다고 보고 통째로 폐기(unsafe)한다.
+  // - 상태창 블록은 줄 단위로, 라벨이 같은 줄만 값(value)을 비교해서 find/replace로 만든다.
+  //   (라벨 자체가 달라졌거나 줄 수가 안 맞으면 그 블록/줄은 건드리지 않고 건너뛴다.)
+  // - 일반 대사/지문 블록은 블록 전체를 find/replace 단위로 삼되, 원본 대비 길이가 너무 크게
+  //   달라지면(30% 미만 또는 300% 초과) AI가 과하게 축약/왜곡했을 위험으로 보고 그 블록은 버린다.
+  function diffBlocksToConflicts(originalText, revisedText) {
+    const origBlocks = splitEnvelopeBlocks(originalText);
+    const newBlocks = splitEnvelopeBlocks(revisedText);
+
+    if (!origBlocks.length || !newBlocks.length) {
+      return { safe: false, reason: "빈 응답", conflicts: [] };
+    }
+    if (origBlocks.length !== newBlocks.length) {
+      return { safe: false, reason: `블록 개수 불일치 (원본 ${origBlocks.length} / 응답 ${newBlocks.length})`, conflicts: [] };
+    }
+
+    const conflicts = [];
+    const notes = [];
+
+    for (let i = 0; i < origBlocks.length; i++) {
+      const ob = origBlocks[i];
+      const nb = newBlocks[i];
+      if (ob === nb) continue;
+
+      const isInfoBlock = /^\[[^\]]+\]/.test(ob);
+
+      if (isInfoBlock) {
+        const oLines = ob.split("\n");
+        const nLines = nb.split("\n");
+        if (oLines.length !== nLines.length) {
+          notes.push(`블록 ${i}: 상태창 줄 수 불일치라 통째로 건너뜀`);
+          continue;
+        }
+        for (let j = 1; j < oLines.length; j++) { // 0번 줄은 "[라벨]" 헤더라 건드리지 않음
+          const oLine = oLines[j];
+          const nLine = nLines[j];
+          if (oLine === nLine) continue;
+          const oLV = splitLabelValue(oLine);
+          const nLV = splitLabelValue(nLine);
+          if (!oLV || !nLV || oLV.label !== nLV.label) {
+            notes.push(`블록 ${i} 줄 ${j}: 라벨 불일치라 건너뜀`);
+            continue;
+          }
+          if (!oLV.value || oLV.value === nLV.value) continue;
+          conflicts.push({ find: oLV.value, replace: nLV.value, reason: `[전체교체] ${oLV.label} 값 변경` });
+        }
+      } else {
+        const ratio = ob.length ? (nb.length / ob.length) : 0;
+        if (ratio < 0.3 || ratio > 3) {
+          notes.push(`블록 ${i}: 길이 변화가 너무 커서(${Math.round(ratio * 100)}%) 안전상 건너뜀`);
+          continue;
+        }
+        conflicts.push({ find: ob, replace: nb, reason: "[전체교체] 대사/지문 블록 변경" });
+      }
+    }
+
+    return { safe: true, conflicts, notes };
   }
 
   // 원본에 find가 "정확히 1번만" 존재하는지 검증 후, 통과한 것만 순서대로 적용한다.
@@ -971,13 +1134,48 @@
     const preset = getActivePreset(roomId);
     if (!preset) { toast("❌ 사용할 API 프리셋이 없습니다.", true); return { skip: true }; }
 
-    if (debug) toast("⏳ 답변 캡처됨 (" + envelopeText.length + "자) → AI에 대조 요청 중... (표시가 잠시 지연됩니다)", false);
+    const mode = getMode(roomId);
+    if (debug) toast("⏳ 답변 캡처됨 (" + envelopeText.length + "자, 모드: " + (mode === "full" ? "전체교체" : "find/replace") + ") → AI에 대조 요청 중... (표시가 잠시 지연됩니다)", false);
 
     try {
-      const { system, user } = buildCorrectionPrompt(note, userText, envelopeText, speakerNames);
-      const aiRes = await callAI(preset, system, user);
-      const raw = aiRes && aiRes.text;
-      const usage = aiRes && aiRes.usage;
+      let usage;
+      let conflictsFromAi;
+
+      if (mode === "full") {
+        const { system, user } = buildFullReplacePrompt(note, userText, envelopeText, speakerNames);
+        const aiRes = await callAI(preset, system, user);
+        usage = aiRes && aiRes.usage;
+        const revisedText = String((aiRes && aiRes.text) || "").trim();
+
+        if (!revisedText) {
+          if (debug) toast("⚠ 전체교체 모드: AI 응답이 비어있음", true);
+          if (usage) { recordTokenUsage(roomId, usage); refreshTokenUI(); }
+          return { skip: true };
+        }
+
+        const diff = diffBlocksToConflicts(envelopeText, revisedText);
+        if (!diff.safe) {
+          if (debug) toast("⚠ 전체교체 모드: " + diff.reason + " — 안전상 전체 폐기", true);
+          if (usage) { recordTokenUsage(roomId, usage); refreshTokenUI(); }
+          return { skip: true };
+        }
+        if (debug && diff.notes && diff.notes.length) {
+          toast("ℹ 전체교체 diff 참고사항:\n" + diff.notes.join("\n"), false);
+        }
+        conflictsFromAi = diff.conflicts;
+      } else {
+        const { system, user } = buildCorrectionPrompt(note, userText, envelopeText, speakerNames);
+        const aiRes = await callAI(preset, system, user);
+        usage = aiRes && aiRes.usage;
+        const raw = aiRes && aiRes.text;
+        const parsed = parseModelJson(raw);
+        if (!parsed || !Array.isArray(parsed.conflicts)) {
+          if (debug) toast("⚠ AI 응답을 JSON으로 못 읽음. 원문 앞부분: " + String(raw || "").slice(0, 150), true);
+          if (usage) { recordTokenUsage(roomId, usage); refreshTokenUI(); }
+          return { skip: true };
+        }
+        conflictsFromAi = parsed.conflicts;
+      }
 
       if (usage) {
         const stats = recordTokenUsage(roomId, usage);
@@ -994,14 +1192,9 @@
         toast("ℹ 이 API는 응답에 토큰 사용량을 안 줘서 집계 불가", false);
       }
 
-      const parsed = parseModelJson(raw);
-      if (!parsed || !Array.isArray(parsed.conflicts)) {
-        if (debug) toast("⚠ AI 응답을 JSON으로 못 읽음. 원문 앞부분: " + String(raw || "").slice(0, 150), true);
-        return { skip: true };
-      }
-      if (!parsed.conflicts.length) { if (debug) toast("✅ 대조 완료 — 노트와 모순되는 부분 없음", false); return { skip: true }; }
+      if (!conflictsFromAi.length) { if (debug) toast("✅ 대조 완료 — 노트와 모순되는 부분 없음", false); return { skip: true }; }
 
-      const { result, applied, skipped } = applyConflicts(envelopeText, parsed.conflicts);
+      const { result, applied, skipped } = applyConflicts(envelopeText, conflictsFromAi);
       if (!applied.length) {
         const reasons = skipped.map((s) => (s.find || "").slice(0, 20) + "→" + s.why).join(" / ");
         if (debug) toast("⚠ AI가 " + skipped.length + "건 제안했지만 전부 안전상 폐기됨: " + reasons, true);
@@ -1449,6 +1642,14 @@
       <label style="margin:0;">디버그 로그 보기 (평소엔 꺼두세요)</label>
     </div>
 
+    <label>교정 방식
+      <select id="modeSelect">
+        <option value="conflict">find/replace (기존 방식, 국소 수정)</option>
+        <option value="full">전체 교체 (답변 통째로 다시 쓰게 한 뒤 자동 diff)</option>
+      </select>
+    </label>
+    <div class="hint">전체 교체는 AI가 답변 전체를 다시 쓰지만, 실제 반영 전에 원본과 자동으로 비교해서 바뀐 부분만 안전하게 적용합니다. 블록 개수가 안 맞으면 통째로 폐기됩니다. 토큰 사용량은 find/replace보다 더 많이 듭니다.</div>
+
     <label>등장인물 목록 (쉼표로 구분, 예: 김젯시,이젯시,박젯시)
       <textarea id="roster" class="roster" placeholder="예: 김젯시,이젯시,박젯시"></textarea>
     </label>
@@ -1507,6 +1708,7 @@
   const btnEl = el("btn");
   const panelEl = el("panel");
   const noteEl = el("note");
+  const modeSelectEl = el("modeSelect");
   const rosterEl = el("roster");
   const roomEl = el("room");
   const countEl = el("count");
@@ -1580,6 +1782,7 @@
   function refreshRoomUI() {
     roomEl.textContent = "Room: " + (roomId ? roomId.slice(0, 24) : "(감지 안 됨)");
     noteEl.value = getNote(roomId);
+    modeSelectEl.value = getMode(roomId);
     rosterEl.value = getRoster(roomId);
     enabledEl.checked = getEnabled(roomId);
     debugModeEl.checked = getDebug(roomId);
@@ -1603,6 +1806,7 @@
   });
   enabledEl.addEventListener("change", () => setEnabled(roomId, enabledEl.checked));
   debugModeEl.addEventListener("change", () => setDebug(roomId, debugModeEl.checked));
+  modeSelectEl.addEventListener("change", () => setMode(roomId, modeSelectEl.value));
 
   // ---- API 탭 ----
   function refreshPresetUI() {
